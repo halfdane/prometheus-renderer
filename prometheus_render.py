@@ -2,6 +2,7 @@
 """Render Prometheus queries as PNG charts."""
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -39,6 +40,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="prometheus-render",
         description="Render a PromQL query as a PNG chart.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {os.environ.get('PROMETHEUS_RENDER_VERSION', 'dev')}",
     )
     parser.add_argument(
         "--url",

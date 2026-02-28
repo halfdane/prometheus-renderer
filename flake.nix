@@ -7,6 +7,9 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
+    let
+      version = "0.1.0";
+    in
     flake-utils.lib.eachSystem [ "aarch64-linux" "x86_64-linux" ] (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -17,6 +20,7 @@
         ]);
 
         prometheus-render = pkgs.writeShellScriptBin "prometheus-render" ''
+          export PROMETHEUS_RENDER_VERSION="${version}"
           exec ${pythonEnv}/bin/python3 ${./prometheus_render.py} "$@"
         '';
       in
