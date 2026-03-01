@@ -165,25 +165,35 @@ def main() -> None:
             vresp.raise_for_status()
             vdata = vresp.json()
             if vdata.get("status") == "success":
+                # Collect and sort events so stagger order is chronological
+                events = []
                 for vseries in vdata["data"]["result"]:
                     if not vseries["values"]:
                         continue
                     ts = float(vseries["values"][0][0])
+                    version = vseries["metric"].get("version", "")
+                    events.append((ts, version))
+                events.sort(key=lambda e: e[0])
+
+                # Stagger label y-positions so rapid deployments don't pile up
+                stagger_levels = 4
+                stagger_step = 0.12
+                for i, (ts, version) in enumerate(events):
                     dt = datetime.fromtimestamp(ts)
                     ax.axvline(x=dt, color="red", linestyle="--", alpha=0.55, linewidth=1)
                     # Label: last two dot-separated components of the version string
                     # e.g. "nixos-system-ada-26.05.20260223.2fc6539" → "20260223.2fc6539"
-                    version = vseries["metric"].get("version", "")
                     if version:
                         parts = version.split(".")
                         short = ".".join(parts[-2:]) if len(parts) >= 2 else version
+                        y_pos = 1.0 - (i % stagger_levels) * stagger_step
                         ax.text(
-                            dt, 1.0, short,
+                            dt, y_pos, short,
                             transform=ax.get_xaxis_transform(),
                             rotation=90, fontsize=6, color="red",
                             va="top", ha="right", alpha=0.75,
                         )
-        except Exception as e:
+        except (requests.RequestException, KeyError, ValueError) as e:
             print(f"Warning: could not fetch vlines query: {e}", file=sys.stderr)
 
     date_fmt = "%H:%M" if range_seconds <= 86400 else "%m-%d"
