@@ -89,6 +89,15 @@ def main() -> None:
         default=None,
         help="Query resolution step in seconds (default: auto, ~300 data points)",
     )
+    parser.add_argument(
+        "--vlines-query",
+        default=None,
+        dest="vlines_query",
+        help=(
+            "PromQL query for event markers: the first timestamp of each returned "
+            "series is drawn as a vertical dashed line (e.g. 'nixos_system_version')"
+        ),
+    )
     args = parser.parse_args()
 
     range_seconds = parse_range(args.range_str)
@@ -139,6 +148,43 @@ def main() -> None:
         values = [float(v[1]) for v in series["values"]]
         label = metric_label(series["metric"])
         ax.plot(timestamps, values, label=label, linewidth=1.5)
+
+    # Draw vertical lines for deployment events
+    if args.vlines_query:
+        try:
+            vresp = requests.get(
+                args.url.rstrip("/") + "/api/v1/query_range",
+                params={
+                    "query": args.vlines_query,
+                    "start": start,
+                    "end": end,
+                    "step": step,
+                },
+                timeout=30,
+            )
+            vresp.raise_for_status()
+            vdata = vresp.json()
+            if vdata.get("status") == "success":
+                for vseries in vdata["data"]["result"]:
+                    if not vseries["values"]:
+                        continue
+                    ts = float(vseries["values"][0][0])
+                    dt = datetime.fromtimestamp(ts)
+                    ax.axvline(x=dt, color="red", linestyle="--", alpha=0.55, linewidth=1)
+                    # Label: last two dot-separated components of the version string
+                    # e.g. "nixos-system-ada-26.05.20260223.2fc6539" → "20260223.2fc6539"
+                    version = vseries["metric"].get("version", "")
+                    if version:
+                        parts = version.split(".")
+                        short = ".".join(parts[-2:]) if len(parts) >= 2 else version
+                        ax.text(
+                            dt, 1.0, short,
+                            transform=ax.get_xaxis_transform(),
+                            rotation=90, fontsize=6, color="red",
+                            va="top", ha="right", alpha=0.75,
+                        )
+        except Exception as e:
+            print(f"Warning: could not fetch vlines query: {e}", file=sys.stderr)
 
     date_fmt = "%H:%M" if range_seconds <= 86400 else "%m-%d"
     ax.xaxis.set_major_formatter(mdates.DateFormatter(date_fmt))
