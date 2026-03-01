@@ -175,24 +175,9 @@ def main() -> None:
                     events.append((ts, version))
                 events.sort(key=lambda e: e[0])
 
-                # Stagger label y-positions so rapid deployments don't pile up
-                stagger_levels = 4
-                stagger_step = 0.12
-                for i, (ts, version) in enumerate(events):
+                for ts, _version in events:
                     dt = datetime.fromtimestamp(ts)
-                    ax.axvline(x=dt, color="red", linestyle="--", alpha=0.55, linewidth=1)
-                    # Label: last two dot-separated components of the version string
-                    # e.g. "nixos-system-ada-26.05.20260223.2fc6539" → "20260223.2fc6539"
-                    if version:
-                        parts = version.split(".")
-                        short = ".".join(parts[-2:]) if len(parts) >= 2 else version
-                        y_pos = 1.0 - (i % stagger_levels) * stagger_step
-                        ax.text(
-                            dt, y_pos, short,
-                            transform=ax.get_xaxis_transform(),
-                            rotation=90, fontsize=6, color="red",
-                            va="top", ha="right", alpha=0.75,
-                        )
+                    ax.axvline(x=dt, color="red", linestyle="-", alpha=0.55, linewidth=1)
         except (requests.RequestException, KeyError, ValueError) as e:
             print(f"Warning: could not fetch vlines query: {e}", file=sys.stderr)
 
