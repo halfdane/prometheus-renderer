@@ -95,7 +95,16 @@ def main() -> None:
         dest="vlines_query",
         help=(
             "PromQL query for event markers: the first timestamp of each returned "
-            "series is drawn as a vertical dashed line (e.g. 'nixos_system_version')"
+            "series is drawn as a vertical line (e.g. 'nixos_system_version')"
+        ),
+    )
+    parser.add_argument(
+        "--style",
+        default="dark_background",
+        help=(
+            "Matplotlib style name (default: dark_background). "
+            "See https://matplotlib.org/stable/gallery/style_sheets/style_sheets_reference.html "
+            "for all available styles."
         ),
     )
     args = parser.parse_args()
@@ -136,6 +145,11 @@ def main() -> None:
         sys.exit(1)
 
     # Render chart
+    try:
+        plt.style.use(args.style)
+    except OSError:
+        print(f"Warning: unknown style '{args.style}', falling back to default.", file=sys.stderr)
+
     dpi = 100
     fig, ax = plt.subplots(
         figsize=(args.width / dpi, args.height / dpi), dpi=dpi
@@ -147,7 +161,7 @@ def main() -> None:
         ]
         values = [float(v[1]) for v in series["values"]]
         label = metric_label(series["metric"])
-        ax.plot(timestamps, values, label=label, linewidth=1.5)
+        ax.plot(timestamps, values, label=label, linewidth=2, solid_capstyle="round")
 
     # Draw vertical lines for deployment events
     if args.vlines_query:
@@ -191,7 +205,11 @@ def main() -> None:
     if len(results) > 1:
         ax.legend(fontsize=8, loc="best")
 
-    ax.grid(True, alpha=0.3)
+    # Clean up spines for a more modern look
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    ax.grid(True, alpha=0.15, linewidth=0.5)
     fig.tight_layout()
 
     try:
