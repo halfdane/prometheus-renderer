@@ -8,7 +8,7 @@
 
   outputs = { self, nixpkgs, flake-utils }:
     let
-      version = "0.1.0";
+      version = "0.1.1";
     in
     flake-utils.lib.eachSystem [ "aarch64-linux" "x86_64-linux" ] (system:
       let
