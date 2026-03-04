@@ -1,2 +1,20 @@
+# Go
+/prometheus-render
+*.exe
+*.test
+*.out
+
+# Nix
 result
-.direnv
+result-*
+
+# direnv
+.direnv/
+
+# Editor
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store

@@ -7,29 +7,33 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    let
-      version = "0.1.4";
-    in
     flake-utils.lib.eachSystem [ "aarch64-linux" "x86_64-linux" ] (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-
-        pythonEnv = pkgs.python3.withPackages (ps: with ps; [
-          requests
-          matplotlib
-        ]);
-
-        prometheus-render = pkgs.writeShellScriptBin "prometheus-render" ''
-          export PROMETHEUS_RENDER_VERSION="${version}"
-          exec ${pythonEnv}/bin/python3 ${./prometheus_render.py} "$@"
-        '';
       in
       {
-        packages.default = prometheus-render;
+        packages.default =
+          let renderVersion = "0.2.0"; in
+          pkgs.buildGoModule {
+            pname = "prometheus-render";
+            version = renderVersion;
+            src = ./.;
+            # Run `nix build` once after `go mod tidy`; Nix will print the
+            # correct hash in the error – paste it here.
+            vendorHash = "sha256-P4n2q61kN4Ea0ODoMQ2QCJB4Tf1zRMYk6vTpDxc2Jv0=";
+            ldflags = [ "-X main.version=v${renderVersion}" ];
+            meta = {
+              description = "Render PromQL queries as PNG charts";
+              mainProgram = "prometheus-render";
+            };
+          };
 
         devShells.default = pkgs.mkShell {
-          buildInputs = [
-            pythonEnv
+          buildInputs = with pkgs; [
+            go
+            gopls
+            gotools
+            go-tools # staticcheck
           ];
         };
       }

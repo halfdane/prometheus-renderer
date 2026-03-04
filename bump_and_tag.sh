@@ -3,14 +3,30 @@ set -e
 
 cd "$(git rev-parse --show-toplevel)"
 
-# Read current version from flake.nix
-CURRENT=$(grep 'version = "' flake.nix | sed 's/.*version = "\([^"]*\)".*/\1/')
+# ── Pre-flight checks ───────────────────────────────────────────────────
+echo "Running tests..."
+go test ./...
+
+echo "Running vet..."
+go vet ./...
+
+echo "Running staticcheck..."
+staticcheck ./...
+
+# If checks changed any tracked files, abort.
+if ! git diff --quiet HEAD; then
+  echo "⚠️  Working tree has uncommitted changes." >&2
+  echo "   Please review, commit, and re-run." >&2
+  exit 1
+fi
+
+# ── Bump version ─────────────────────────────────────────────────────────
+CURRENT=$(grep 'renderVersion = "' flake.nix | sed 's/.*renderVersion = "\([^"]*\)".*/\1/')
 if [[ -z "$CURRENT" ]]; then
   echo "Could not determine current version from flake.nix" >&2
   exit 1
 fi
 
-# Auto-bump patch, or accept an explicit version as first argument
 if [[ -n "$1" ]]; then
   NEXT="$1"
 else
@@ -20,8 +36,7 @@ fi
 
 echo "Bumping $CURRENT -> $NEXT"
 
-# Patch flake.nix in place
-sed -i "s/version = \"$CURRENT\"/version = \"$NEXT\"/" flake.nix
+sed -i "s/renderVersion = \"$CURRENT\"/renderVersion = \"$NEXT\"/" flake.nix
 
 git add flake.nix
 git commit -m "chore: bump version to v$NEXT"
