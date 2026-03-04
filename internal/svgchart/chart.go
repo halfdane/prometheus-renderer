@@ -1,0 +1,306 @@
+// Package svgchart renders Prometheus time-series data as SVG images using
+// only the Go standard library — no external dependencies.
+package svgchart
+
+import (
+	"fmt"
+	"io"
+	"math"
+	"strings"
+	"time"
+)
+
+// Layout constants (pixels).
+const (
+	marginLeft   = 60 // space for y-axis labels
+	marginRight  = 42 // space for per-series end labels
+	marginTop    = 28 // space for panel title
+	marginBottom = 34 // space for x-axis labels
+	panelGap     = 6  // vertical gap between stacked panels
+)
+
+// ---- Public types -----------------------------------------------------------
+
+// Figure is the top-level rendering container.
+type Figure struct {
+	Width        int
+	PanelHeight  int       // height of each individual panel in pixels
+	Light        bool      // use light colour scheme
+	TimeStart    time.Time // left edge of the time axis
+	TimeEnd      time.Time // right edge of the time axis
+	RangeSeconds int       // total range in seconds (used for tick spacing)
+	VLines       []VLine   // vertical event markers shown on every panel
+	Panels       []Panel
+}
+
+// Panel is one chart within a Figure, sharing the same time axis.
+type Panel struct {
+	Title  string
+	Series []Series // multiple series share the same y-axis scale
+	VLines []VLine  // panel-local event markers (merged with Figure.VLines)
+}
+
+// Series holds a single time-series to be drawn as a line.
+type Series struct {
+	Label      string
+	Timestamps []time.Time
+	Values     []float64
+}
+
+// VLine is a vertical marker drawn at a specific time.
+type VLine struct {
+	Time time.Time
+}
+
+// ---- Entry point -----------------------------------------------------------
+
+// Render writes an SVG document representing fig to w.
+func Render(fig Figure, w io.Writer) error {
+	sc := darkScheme
+	if fig.Light {
+		sc = lightScheme
+	}
+
+	n := len(fig.Panels)
+	if n == 0 {
+		return fmt.Errorf("svgchart: no panels")
+	}
+
+	totalH := n*fig.PanelHeight + (n-1)*panelGap
+	svgW := fig.Width
+	svgH := totalH
+
+	// Open SVG root.
+	fmt.Fprintf(w, `<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" style="background:%s;font-family:monospace,sans-serif">%s`,
+		svgW, svgH, sc.bg, "\n")
+
+	for i, panel := range fig.Panels {
+		yOffset := i * (fig.PanelHeight + panelGap)
+
+		// Merge figure-level and panel-level vlines.
+		merged := make([]VLine, 0, len(fig.VLines)+len(panel.VLines))
+		merged = append(merged, fig.VLines...)
+		merged = append(merged, panel.VLines...)
+
+		if err := renderPanel(w, panel, merged, fig, sc, yOffset, i); err != nil {
+			return err
+		}
+	}
+
+	fmt.Fprintln(w, `</svg>`)
+	return nil
+}
+
+// ---- Panel renderer --------------------------------------------------------
+
+func renderPanel(w io.Writer, panel Panel, vlines []VLine, fig Figure, sc scheme, yOff, idx int) error {
+	ph := fig.PanelHeight
+	pw := fig.Width
+
+	plotX := marginLeft
+	plotY := marginTop
+	plotW := pw - marginLeft - marginRight
+	plotH := ph - marginTop - marginBottom
+
+	clipID := fmt.Sprintf("clip%d", idx)
+
+	// Canvas background for this panel.
+	fmt.Fprintf(w, `  <rect x="0" y="%d" width="%d" height="%d" fill="%s"/>%s`,
+		yOff, pw, ph, sc.canvas, "\n")
+
+	// Clip path restricts series lines to the plot area.
+	// Coordinates are in the group-local space (after the translate below).
+	fmt.Fprintf(w, `  <defs><clipPath id="%s"><rect x="%d" y="%d" width="%d" height="%d"/></clipPath></defs>%s`,
+		clipID, plotX, plotY, plotW, plotH, "\n")
+
+	// Open panel group.
+	fmt.Fprintf(w, `  <g transform="translate(0,%d)">%s`, yOff, "\n")
+
+	// Title.
+	if panel.Title != "" {
+		fmt.Fprintf(w, `    <text x="%d" y="%d" fill="%s" font-size="13" text-anchor="middle">%s</text>%s`,
+			plotX+plotW/2, marginTop-6, sc.text, xmlEsc(panel.Title), "\n")
+	}
+
+	// Compute y-axis range across all series.
+	dataMin, dataMax := seriesRange(panel.Series)
+	ticks, niceMin, niceMax := yTicks(dataMin, dataMax)
+
+	ySpan := niceMax - niceMin
+	if ySpan == 0 {
+		ySpan = 1
+	}
+	tSpan := fig.TimeEnd.Sub(fig.TimeStart).Seconds()
+	if tSpan <= 0 {
+		tSpan = 1
+	}
+
+	// Helpers: data → pixel.
+	toX := func(t time.Time) float64 {
+		frac := t.Sub(fig.TimeStart).Seconds() / tSpan
+		return float64(plotX) + frac*float64(plotW)
+	}
+	toY := func(v float64) float64 {
+		frac := (v - niceMin) / ySpan
+		return float64(plotY+plotH) - frac*float64(plotH)
+	}
+
+	// --- Y-axis grid lines and labels ---
+	for _, tick := range ticks {
+		py := int(math.Round(toY(tick.Value)))
+		if py < plotY || py > plotY+plotH {
+			continue
+		}
+		// Grid line.
+		fmt.Fprintf(w, `    <line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="1"/>%s`,
+			plotX, py, plotX+plotW, py, sc.grid, "\n")
+		// Label.
+		fmt.Fprintf(w, `    <text x="%d" y="%d" fill="%s" font-size="11" text-anchor="end" dominant-baseline="middle">%s</text>%s`,
+			plotX-4, py, sc.axis, xmlEsc(tick.Label), "\n")
+	}
+
+	// Y-axis border line.
+	fmt.Fprintf(w, `    <line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="1"/>%s`,
+		plotX, plotY, plotX, plotY+plotH, sc.axis, "\n")
+
+	// --- X-axis ticks and labels ---
+	xticks := xTicks(fig.TimeStart, fig.TimeEnd, fig.RangeSeconds)
+	for _, tick := range xticks {
+		px := int(math.Round(toX(tick.T)))
+		if px < plotX || px > plotX+plotW {
+			continue
+		}
+		// Tick mark.
+		fmt.Fprintf(w, `    <line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="1"/>%s`,
+			px, plotY+plotH, px, plotY+plotH+5, sc.axis, "\n")
+		// Label.
+		fmt.Fprintf(w, `    <text x="%d" y="%d" fill="%s" font-size="11" text-anchor="middle">%s</text>%s`,
+			px, plotY+plotH+18, sc.axis, xmlEsc(tick.Label), "\n")
+	}
+
+	// X-axis border line.
+	fmt.Fprintf(w, `    <line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="1"/>%s`,
+		plotX, plotY+plotH, plotX+plotW, plotY+plotH, sc.axis, "\n")
+
+	// --- Vertical event lines (rendered inside clip) ---
+	if len(vlines) > 0 {
+		fmt.Fprintf(w, `    <g clip-path="url(#%s)">%s`, clipID, "\n")
+		for _, vl := range vlines {
+			px := math.Round(toX(vl.Time))
+			fmt.Fprintf(w, `      <line x1="%.1f" y1="%d" x2="%.1f" y2="%d" stroke="%s" stroke-width="1.5"/>%s`,
+				px, plotY, px, plotY+plotH, sc.vline, "\n")
+		}
+		fmt.Fprintln(w, `    </g>`)
+	}
+
+	// --- Series lines (rendered inside clip) ---
+	fmt.Fprintf(w, `    <g clip-path="url(#%s)">%s`, clipID, "\n")
+	for si, s := range panel.Series {
+		color := sc.lines[si%len(sc.lines)]
+		d := buildPath(s, toX, toY)
+		if d == "" {
+			continue
+		}
+		fmt.Fprintf(w, `      <path d="%s" fill="none" stroke="%s" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>%s`,
+			d, color, "\n")
+	}
+	fmt.Fprintln(w, `    </g>`)
+
+	// --- Per-series end labels (outside clip, right margin) ---
+	for si, s := range panel.Series {
+		color := sc.lines[si%len(sc.lines)]
+		if s.Label == "" || len(s.Values) == 0 {
+			continue
+		}
+		// Find last non-NaN value for vertical positioning.
+		labelY := plotY + plotH/2
+		for j := len(s.Values) - 1; j >= 0; j-- {
+			if !math.IsNaN(s.Values[j]) && !math.IsInf(s.Values[j], 0) {
+				labelY = int(math.Round(toY(s.Values[j])))
+				break
+			}
+		}
+		// Clamp within plot area.
+		if labelY < plotY+8 {
+			labelY = plotY + 8
+		}
+		if labelY > plotY+plotH-4 {
+			labelY = plotY + plotH - 4
+		}
+		fmt.Fprintf(w, `    <text x="%d" y="%d" fill="%s" font-size="10" dominant-baseline="middle">%s</text>%s`,
+			plotX+plotW+4, labelY, color, xmlEsc(s.Label), "\n")
+	}
+
+	// Close panel group.
+	fmt.Fprintln(w, `  </g>`)
+	return nil
+}
+
+// ---- Helpers ----------------------------------------------------------------
+
+// buildPath converts a series to an SVG path d= attribute string.
+// NaN/Inf values cause a gap (new M command) so the line is visually broken.
+func buildPath(s Series, toX func(time.Time) float64, toY func(float64) float64) string {
+	if len(s.Values) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	inRun := false
+
+	for i, v := range s.Values {
+		if i >= len(s.Timestamps) {
+			break
+		}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			inRun = false
+			continue
+		}
+		x := toX(s.Timestamps[i])
+		y := toY(v)
+		if !inRun {
+			if sb.Len() > 0 {
+				sb.WriteByte(' ')
+			}
+			fmt.Fprintf(&sb, "M %.2f %.2f", x, y)
+			inRun = true
+		} else {
+			fmt.Fprintf(&sb, " L %.2f %.2f", x, y)
+		}
+	}
+	return sb.String()
+}
+
+// seriesRange returns the overall min/max of all finite values across all series.
+func seriesRange(series []Series) (float64, float64) {
+	min, max := math.MaxFloat64, -math.MaxFloat64
+	for _, s := range series {
+		for _, v := range s.Values {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				continue
+			}
+			if v < min {
+				min = v
+			}
+			if v > max {
+				max = v
+			}
+		}
+	}
+	if min == math.MaxFloat64 {
+		return 0, 1
+	}
+	if min == max {
+		min -= 1
+		max += 1
+	}
+	return min, max
+}
+
+// xmlEsc escapes the minimal set of characters required for SVG text content.
+func xmlEsc(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
+}

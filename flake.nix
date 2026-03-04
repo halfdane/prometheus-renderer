@@ -20,7 +20,7 @@
             src = ./.;
             # Run `nix build` once after `go mod tidy`; Nix will print the
             # correct hash in the error – paste it here.
-            vendorHash = "sha256-rDVNp89Qw78wM+nUJAOPevTPdCjPaTCRyaFSmdpD2FE=";
+            vendorHash = null;
             ldflags = [ "-X main.version=v${renderVersion}" ];
             meta = {
               description = "Render PromQL queries as PNG charts";

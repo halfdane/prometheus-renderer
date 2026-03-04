@@ -10,14 +10,14 @@ import (
 	"strconv"
 	"time"
 
-	renderchart "github.com/halfdane/prometheus-renderer/internal/chart"
 	"github.com/halfdane/prometheus-renderer/internal/promclient"
+	"github.com/halfdane/prometheus-renderer/internal/svgchart"
 )
 
 // version is set at build time via -ldflags "-X main.version=vX.Y.Z".
 var version = "dev"
 
-const usage = `prometheus-render – render PromQL queries as PNG charts
+const usage = `prometheus-render – render PromQL queries as SVG charts
 
 Usage:
   prometheus-render [flags]
@@ -27,9 +27,9 @@ Flags:
   --query         PromQL query expression (required)
   --range         Time range, e.g. 1h, 24h, 7d (default: 24h)
   --title         Chart title (optional)
-  --output        Output PNG file path (required)
+  --output        Output SVG file path (required)
   --width         Image width in pixels (default: 800)
-  --height        Image height in pixels (default: 300)
+  --height        Panel height in pixels (default: 300)
   --step          Resolution step in seconds; auto-computed when omitted
   --vlines-query  PromQL query for event markers: the first timestamp of each
                   returned series is drawn as a vertical line
@@ -66,7 +66,7 @@ func run(args []string) error {
 	fs.StringVar(&query, "query", "", "PromQL query expression")
 	fs.StringVar(&rangeStr, "range", "24h", "Time range (e.g. 1h, 24h, 7d)")
 	fs.StringVar(&title, "title", "", "Chart title")
-	fs.StringVar(&output, "output", "", "Output PNG file path")
+	fs.StringVar(&output, "output", "", "Output SVG file path")
 	fs.IntVar(&width, "width", 800, "Image width in pixels")
 	fs.IntVar(&height, "height", 300, "Image height in pixels")
 	fs.StringVar(&step, "step", "", "Resolution step in seconds (default: auto)")
@@ -124,7 +124,6 @@ func run(args []string) error {
 
 	var vlines []promclient.Series
 	if vlinesQuery != "" {
-		fmt.Fprintln(os.Stderr, "warning: --vlines-query is not supported with the current chart backend and will be ignored")
 		vlines, err = client.QueryRange(ctx, promclient.QueryRangeParams{
 			Query: vlinesQuery,
 			Start: start,
@@ -143,19 +142,49 @@ func run(args []string) error {
 	}
 	defer f.Close()
 
-	opts := renderchart.Options{
+	fig := svgchart.Figure{
 		Width:        width,
-		Height:       height,
-		Title:        title,
+		PanelHeight:  height,
 		Light:        light,
+		TimeStart:    start,
+		TimeEnd:      now,
 		RangeSeconds: rangeSeconds,
+		VLines:       toVLines(vlines),
+		Panels: []svgchart.Panel{{
+			Title:  title,
+			Series: toSeries(series),
+		}},
 	}
 
-	if err := renderchart.Render(series, vlines, opts, f); err != nil {
+	if err := svgchart.Render(fig, f); err != nil {
 		return fmt.Errorf("render chart: %w", err)
 	}
 
 	return nil
+}
+
+// toSeries converts Prometheus series to svgchart.Series values.
+func toSeries(ps []promclient.Series) []svgchart.Series {
+	out := make([]svgchart.Series, 0, len(ps))
+	for _, s := range ps {
+		out = append(out, svgchart.Series{
+			Label:      s.Label,
+			Timestamps: s.Timestamps,
+			Values:     s.Values,
+		})
+	}
+	return out
+}
+
+// toVLines derives one VLine from the first timestamp of each Prometheus series.
+func toVLines(ps []promclient.Series) []svgchart.VLine {
+	out := make([]svgchart.VLine, 0, len(ps))
+	for _, s := range ps {
+		if len(s.Timestamps) > 0 {
+			out = append(out, svgchart.VLine{Time: s.Timestamps[0]})
+		}
+	}
+	return out
 }
 
 var rangeRe = regexp.MustCompile(`^(\d+)([smhdw])$`)
