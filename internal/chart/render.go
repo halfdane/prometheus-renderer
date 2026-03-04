@@ -1,12 +1,13 @@
-// Package chart renders Prometheus time-series data as PNG images using go-chart.
+// Package chart renders Prometheus time-series data as PNG images using go-charts.
 package chart
 
 import (
 	"fmt"
 	"io"
+	"sort"
+	"time"
 
-	chart "github.com/wcharczuk/go-chart/v2"
-	"github.com/wcharczuk/go-chart/v2/drawing"
+	charts "github.com/vicanso/go-charts/v2"
 
 	"github.com/halfdane/prometheus-renderer/internal/promclient"
 )
@@ -20,68 +21,19 @@ type Options struct {
 	RangeSeconds int  // determines the X axis time format
 }
 
-type colorScheme struct {
-	lines  []drawing.Color
-	bg     drawing.Color
-	canvas drawing.Color
-	text   drawing.Color
-	axis   drawing.Color
-	grid   drawing.Color
-	vline  drawing.Color
-}
-
-// Catppuccin Mocha-inspired dark scheme.
-var dark = colorScheme{
-	lines: []drawing.Color{
-		drawing.ColorFromHex("7dc4e4"),
-		drawing.ColorFromHex("a6e3a1"),
-		drawing.ColorFromHex("fab387"),
-		drawing.ColorFromHex("cba6f7"),
-		drawing.ColorFromHex("f38ba8"),
-		drawing.ColorFromHex("89dceb"),
-		drawing.ColorFromHex("f9e2af"),
-		drawing.ColorFromHex("74c7ec"),
-	},
-	bg:     drawing.ColorFromHex("1e1e2e"),
-	canvas: drawing.ColorFromHex("181825"),
-	text:   drawing.ColorFromHex("cdd6f4"),
-	axis:   drawing.ColorFromHex("6c7086"),
-	grid:   drawing.ColorFromHex("313244"),
-	vline:  drawing.Color{R: 243, G: 139, B: 168, A: 140},
-}
-
-// Catppuccin Latte-inspired light scheme.
-var light = colorScheme{
-	lines: []drawing.Color{
-		drawing.ColorFromHex("1e66f5"),
-		drawing.ColorFromHex("40a02b"),
-		drawing.ColorFromHex("df8e1d"),
-		drawing.ColorFromHex("8839ef"),
-		drawing.ColorFromHex("d20f39"),
-		drawing.ColorFromHex("04a5e5"),
-		drawing.ColorFromHex("209fb5"),
-		drawing.ColorFromHex("e64553"),
-	},
-	bg:     drawing.ColorFromHex("eff1f5"),
-	canvas: drawing.ColorFromHex("e6e9ef"),
-	text:   drawing.ColorFromHex("4c4f69"),
-	axis:   drawing.ColorFromHex("8c8fa1"),
-	grid:   drawing.ColorFromHex("bcc0cc"),
-	vline:  drawing.Color{R: 210, G: 15, B: 57, A: 140},
-}
-
 // Render draws the chart to w as a PNG.
-// series is the main data; vlines contains event-marker series (only the first
-// timestamp of each is used to draw a vertical line).
+//
+// series is the main data. vlines is accepted for API compatibility but is not
+// rendered: vicanso/go-charts does not support arbitrary vertical lines on the
+// X axis. A warning is printed to stderr when vlines are supplied.
 func Render(series []promclient.Series, vlines []promclient.Series, opts Options, w io.Writer) error {
 	if len(series) == 0 {
 		return fmt.Errorf("no series to render")
 	}
 
-	cs := dark
-	if opts.Light {
-		cs = light
-	}
+	// vlines are not rendered: vicanso/go-charts does not support arbitrary
+	// vertical lines on the X axis. The caller is responsible for warning the user.
+	_ = vlines
 
 	// Choose X axis time format based on the queried range.
 	timeFormat := "15:04"
@@ -89,110 +41,93 @@ func Render(series []promclient.Series, vlines []promclient.Series, opts Options
 		timeFormat = "01-02"
 	}
 
-	// Build the main line series.
-	chartSeries := make([]chart.Series, 0, len(series)*2)
+	// Build a unified, sorted timestamp axis from all series.
+	allTS := unifiedTimestamps(series)
+
+	// Format X axis labels.
+	xLabels := make([]string, len(allTS))
+	for i, t := range allTS {
+		xLabels[i] = t.Format(timeFormat)
+	}
+
+	// Build per-series float64 values aligned to the unified axis.
+	// Missing timestamps are filled with the library's null sentinel.
+	values := make([][]float64, len(series))
+	labels := make([]string, len(series))
 	for i, s := range series {
-		lineColor := cs.lines[i%len(cs.lines)]
-		ts := chart.TimeSeries{
-			Name:    s.Label,
-			XValues: s.Timestamps,
-			YValues: s.Values,
-			Style: chart.Style{
-				StrokeColor: lineColor,
-				StrokeWidth: 2,
-				// Transparent fill so only the line is drawn.
-				FillColor: drawing.Color{R: lineColor.R, G: lineColor.G, B: lineColor.B, A: 0},
-			},
-		}
-		chartSeries = append(chartSeries, ts)
+		values[i] = alignValues(s, allTS)
+		labels[i] = s.Label
 	}
 
-	// For multi-series charts, annotate the last value of each line with its
-	// label so the user can identify the series without a separate legend box.
-	if len(series) > 1 {
-		for i := range series {
-			lineColor := cs.lines[i%len(cs.lines)]
-			inner := chartSeries[i].(chart.TimeSeries)
-			if len(inner.XValues) == 0 {
-				continue
-			}
-			lastX := float64(inner.XValues[len(inner.XValues)-1].UnixNano())
-			lastY := inner.YValues[len(inner.YValues)-1]
-			chartSeries = append(chartSeries, chart.AnnotationSeries{
-				Annotations: []chart.Value2{
-					{Label: inner.Name, XValue: lastX, YValue: lastY},
-				},
-				Style: chart.Style{
-					StrokeColor: lineColor,
-					FontColor:   lineColor,
-					FontSize:    7,
-				},
-			})
-		}
+	theme := "dark"
+	if opts.Light {
+		theme = "light"
 	}
 
-	// Map each vlines series to an XAxis GridLine at its first timestamp.
-	vlineGridLines := buildVlineGridLines(vlines, cs.vline)
-
-	c := chart.Chart{
-		Width:  opts.Width,
-		Height: opts.Height,
-		Title:  opts.Title,
-		TitleStyle: chart.Style{
-			FontColor: cs.text,
-			FontSize:  11,
-		},
-		Background: chart.Style{
-			FillColor:   cs.bg,
-			StrokeColor: cs.bg,
-			Padding:     chart.Box{Top: 20, Left: 20, Right: 40, Bottom: 10},
-		},
-		Canvas: chart.Style{
-			FillColor:   cs.canvas,
-			StrokeColor: cs.canvas,
-		},
-		XAxis: chart.XAxis{
-			ValueFormatter: chart.TimeValueFormatterWithFormat(timeFormat),
-			Style: chart.Style{
-				FontColor:   cs.text,
-				StrokeColor: cs.axis,
-				FontSize:    8,
-			},
-			GridLines: vlineGridLines,
-		},
-		YAxis: chart.YAxis{
-			Style: chart.Style{
-				FontColor:   cs.text,
-				StrokeColor: cs.axis,
-				FontSize:    8,
-			},
-			GridMajorStyle: chart.Style{
-				StrokeColor: cs.grid,
-				StrokeWidth: 0.5,
-			},
-		},
-		Series: chartSeries,
+	// Aim for ~6 readable X-axis tick labels regardless of data density.
+	splitNumber := len(allTS) / 6
+	if splitNumber < 1 {
+		splitNumber = 1
 	}
 
-	return c.Render(chart.PNG, w)
+	p, err := charts.LineRender(
+		values,
+		charts.PNGTypeOption(),
+		charts.TitleTextOptionFunc(opts.Title),
+		charts.XAxisDataOptionFunc(xLabels, charts.FalseFlag()),
+		charts.LegendLabelsOptionFunc(labels, charts.PositionCenter),
+		charts.ThemeOptionFunc(theme),
+		func(opt *charts.ChartOption) {
+			opt.Width = opts.Width
+			opt.Height = opts.Height
+			opt.SymbolShow = charts.FalseFlag()
+			opt.LineStrokeWidth = 2
+			opt.XAxis.SplitNumber = splitNumber
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("render chart: %w", err)
+	}
+
+	buf, err := p.Bytes()
+	if err != nil {
+		return fmt.Errorf("encode PNG: %w", err)
+	}
+
+	_, err = w.Write(buf)
+	return err
 }
 
-func buildVlineGridLines(vlines []promclient.Series, color drawing.Color) []chart.GridLine {
-	if len(vlines) == 0 {
-		return nil
-	}
-	lines := make([]chart.GridLine, 0, len(vlines))
-	for _, vs := range vlines {
-		if len(vs.Timestamps) == 0 {
-			continue
+// unifiedTimestamps returns the sorted union of all timestamps across series.
+func unifiedTimestamps(series []promclient.Series) []time.Time {
+	seen := make(map[time.Time]struct{})
+	for _, s := range series {
+		for _, t := range s.Timestamps {
+			seen[t] = struct{}{}
 		}
-		lines = append(lines, chart.GridLine{
-			Value: float64(vs.Timestamps[0].UnixNano()),
-			Style: chart.Style{
-				StrokeColor: color,
-				StrokeWidth: 1,
-			},
-		})
 	}
-	return lines
+	all := make([]time.Time, 0, len(seen))
+	for t := range seen {
+		all = append(all, t)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Before(all[j]) })
+	return all
+}
+
+// alignValues maps a single series onto the shared timestamp axis.
+// Slots with no data from this series are filled with the null sentinel.
+func alignValues(s promclient.Series, axis []time.Time) []float64 {
+	idx := make(map[time.Time]float64, len(s.Timestamps))
+	for i, t := range s.Timestamps {
+		idx[t] = s.Values[i]
+	}
+	out := make([]float64, len(axis))
+	for i, t := range axis {
+		if v, ok := idx[t]; ok {
+			out[i] = v
+		} else {
+			out[i] = charts.GetNullValue()
+		}
+	}
+	return out
 }

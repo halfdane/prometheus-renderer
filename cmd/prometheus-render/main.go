@@ -124,6 +124,7 @@ func run(args []string) error {
 
 	var vlines []promclient.Series
 	if vlinesQuery != "" {
+		fmt.Fprintln(os.Stderr, "warning: --vlines-query is not supported with the current chart backend and will be ignored")
 		vlines, err = client.QueryRange(ctx, promclient.QueryRangeParams{
 			Query: vlinesQuery,
 			Start: start,
