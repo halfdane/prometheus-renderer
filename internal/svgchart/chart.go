@@ -30,6 +30,7 @@ type Figure struct {
 	Width        int
 	PanelHeight  int       // height of each individual panel in pixels
 	Light        bool      // use light colour scheme
+	Smooth       bool      // draw series as smooth curves (cardinal spline) instead of straight lines
 	TimeStart    time.Time // left edge of the time axis
 	TimeEnd      time.Time // right edge of the time axis
 	RangeSeconds int       // total range in seconds (used for tick spacing)
@@ -214,7 +215,12 @@ func renderPanel(w io.Writer, panel Panel, vlines []VLine, legendRows [][]int, t
 	fmt.Fprintf(w, `    <g clip-path="url(#%s)">%s`, clipID, "\n")
 	for si, s := range panel.Series {
 		color := sc.lines[si%len(sc.lines)]
-		d := buildPath(s, toX, toY)
+		var d string
+		if fig.Smooth {
+			d = buildSmoothPath(s, toX, toY)
+		} else {
+			d = buildPath(s, toX, toY)
+		}
 		if d == "" {
 			continue
 		}
@@ -244,6 +250,70 @@ func renderPanel(w io.Writer, panel Panel, vlines []VLine, legendRows [][]int, t
 }
 
 // ---- Helpers ----------------------------------------------------------------
+
+// smoothTension controls how tightly the cardinal spline follows the data.
+// 0 = straight lines; ~0.4 gives pleasing curves without excessive overshoot.
+const smoothTension = 0.4
+
+// buildSmoothPath converts a series to an SVG path using cubic bezier curves.
+// Control points are derived via a cardinal spline so the curve passes exactly
+// through every data point. NaN/Inf values produce visible gaps as with buildPath.
+func buildSmoothPath(s Series, toX func(time.Time) float64, toY func(float64) float64) string {
+	if len(s.Values) == 0 {
+		return ""
+	}
+
+	type pt struct{ x, y float64 }
+
+	// Split into runs of consecutive finite values.
+	var runs [][]pt
+	var run []pt
+	for i, v := range s.Values {
+		if i >= len(s.Timestamps) {
+			break
+		}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			if len(run) > 0 {
+				runs = append(runs, run)
+				run = nil
+			}
+			continue
+		}
+		run = append(run, pt{toX(s.Timestamps[i]), toY(v)})
+	}
+	if len(run) > 0 {
+		runs = append(runs, run)
+	}
+
+	var sb strings.Builder
+	for ri, pts := range runs {
+		n := len(pts)
+		if n == 0 {
+			continue
+		}
+		if ri > 0 {
+			sb.WriteByte(' ')
+		}
+		fmt.Fprintf(&sb, "M %.2f %.2f", pts[0].x, pts[0].y)
+		if n == 1 {
+			continue
+		}
+		for i := 0; i < n-1; i++ {
+			prev := pts[max(0, i-1)]
+			curr := pts[i]
+			next := pts[i+1]
+			next2 := pts[min(n-1, i+2)]
+			// Cardinal spline control points.
+			cp1x := curr.x + (next.x-prev.x)*smoothTension
+			cp1y := curr.y + (next.y-prev.y)*smoothTension
+			cp2x := next.x - (next2.x-curr.x)*smoothTension
+			cp2y := next.y - (next2.y-curr.y)*smoothTension
+			fmt.Fprintf(&sb, " C %.2f,%.2f %.2f,%.2f %.2f,%.2f",
+				cp1x, cp1y, cp2x, cp2y, next.x, next.y)
+		}
+	}
+	return sb.String()
+}
 
 // buildPath converts a series to an SVG path d= attribute string.
 // NaN/Inf values cause a gap (new M command) so the line is visually broken.

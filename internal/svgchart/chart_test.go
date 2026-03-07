@@ -153,6 +153,72 @@ func TestBuildPath(t *testing.T) {
 	})
 }
 
+// ---- buildSmoothPath --------------------------------------------------------
+
+func TestBuildSmoothPath(t *testing.T) {
+	now := time.Now()
+	mkTS := func(n int) []time.Time {
+		ts := make([]time.Time, n)
+		for i := range ts {
+			ts[i] = now.Add(time.Duration(i) * time.Minute)
+		}
+		return ts
+	}
+	toXY := func(t time.Time) float64 { return float64(t.Unix()) }
+	identY := func(v float64) float64 { return v }
+
+	t.Run("empty", func(t *testing.T) {
+		if buildSmoothPath(Series{}, toXY, identY) != "" {
+			t.Error("expected empty string for empty series")
+		}
+	})
+
+	t.Run("singlePoint", func(t *testing.T) {
+		s := Series{Timestamps: mkTS(1), Values: []float64{5}}
+		d := buildSmoothPath(s, toXY, identY)
+		if !strings.HasPrefix(d, "M ") {
+			t.Errorf("single point should start with M, got %q", d)
+		}
+		if strings.Contains(d, " C ") {
+			t.Error("single point should not contain C command")
+		}
+	})
+
+	t.Run("usesCCommands", func(t *testing.T) {
+		s := Series{Timestamps: mkTS(5), Values: []float64{1, 2, 3, 4, 5}}
+		d := buildSmoothPath(s, toXY, identY)
+		if strings.Contains(d, " L ") {
+			t.Errorf("smooth path should not contain L commands, got: %s", d)
+		}
+		if !strings.Contains(d, " C ") {
+			t.Errorf("smooth path should contain C commands, got: %s", d)
+		}
+		// One M + four C segments for 5 points.
+		if strings.Count(d, "M ") != 1 {
+			t.Errorf("expected 1 M command, got: %s", d)
+		}
+		if strings.Count(d, " C ") != 4 {
+			t.Errorf("expected 4 C commands for 5 points, got: %s", d)
+		}
+	})
+
+	t.Run("gapOnNaN", func(t *testing.T) {
+		ts := mkTS(6)
+		s := Series{Timestamps: ts, Values: []float64{1, 2, math.NaN(), math.NaN(), 5, 6}}
+		d := buildSmoothPath(s, toXY, identY)
+		if strings.Count(d, "M ") != 2 {
+			t.Errorf("expected 2 M commands for NaN gap, got: %s", d)
+		}
+	})
+
+	t.Run("allNaN", func(t *testing.T) {
+		s := Series{Timestamps: mkTS(3), Values: []float64{math.NaN(), math.NaN(), math.NaN()}}
+		if buildSmoothPath(s, toXY, identY) != "" {
+			t.Error("expected empty string for all-NaN smooth series")
+		}
+	})
+}
+
 // ---- Render integration -----------------------------------------------------
 
 func makeTestFigure(light bool) Figure {
@@ -254,6 +320,34 @@ func TestRenderSeriesPath(t *testing.T) {
 	_ = Render(fig, &sb)
 	if !strings.Contains(sb.String(), `<path d="M`) {
 		t.Error("expected at least one <path element for series data")
+	}
+}
+
+func TestRenderSmoothUsesC(t *testing.T) {
+	fig := makeTestFigure(false)
+	fig.Smooth = true
+	var sb strings.Builder
+	_ = Render(fig, &sb)
+	out := sb.String()
+	if !strings.Contains(out, " C ") {
+		t.Error("smooth render should produce C bezier commands")
+	}
+	if strings.Contains(out, " L ") {
+		t.Error("smooth render should not produce L line commands")
+	}
+}
+
+func TestRenderNonSmoothUsesL(t *testing.T) {
+	fig := makeTestFigure(false)
+	fig.Smooth = false
+	var sb strings.Builder
+	_ = Render(fig, &sb)
+	out := sb.String()
+	if strings.Contains(out, " C ") {
+		t.Error("non-smooth render should not produce C bezier commands")
+	}
+	if !strings.Contains(out, " L ") {
+		t.Error("non-smooth render should produce L line commands")
 	}
 }
 

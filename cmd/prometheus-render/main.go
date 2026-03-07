@@ -34,6 +34,7 @@ Flags:
   --vlines-query  PromQL query for event markers: the first timestamp of each
                   returned series is drawn as a vertical line
   --light         Use a light color scheme (default: dark)
+  --smooth        Draw series as smooth curves instead of straight lines
   --version       Print version and exit
 `
 
@@ -59,6 +60,7 @@ func run(args []string) error {
 		step         string
 		vlinesQuery  string
 		light        bool
+		smooth       bool
 		showVersion  bool
 	)
 
@@ -72,6 +74,7 @@ func run(args []string) error {
 	fs.StringVar(&step, "step", "", "Resolution step in seconds (default: auto)")
 	fs.StringVar(&vlinesQuery, "vlines-query", "", "PromQL query for vertical event markers")
 	fs.BoolVar(&light, "light", false, "Use light color scheme")
+	fs.BoolVar(&smooth, "smooth", false, "Draw series as smooth curves")
 	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -146,6 +149,7 @@ func run(args []string) error {
 		Width:        width,
 		PanelHeight:  height,
 		Light:        light,
+		Smooth:       smooth,
 		TimeStart:    start,
 		TimeEnd:      now,
 		RangeSeconds: rangeSeconds,
