@@ -92,6 +92,12 @@ func yTicks(dataMin, dataMax float64) (ticks []yTick, niceMin, niceMax float64) 
 	niceMin = math.Floor(dataMin/step) * step
 	niceMax = math.Ceil(dataMax/step) * step
 
+	// Guard: if the data falls exactly on a tick boundary, niceMin==niceMax.
+	if niceMax-niceMin < step*0.5 {
+		niceMin -= step
+		niceMax += step
+	}
+
 	for v := niceMin; v <= niceMax+step*1e-9; v += step {
 		rounded := math.Round(v/step) * step
 		ticks = append(ticks, yTick{Value: rounded, Label: fmtY(rounded)})

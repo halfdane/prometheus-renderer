@@ -12,11 +12,15 @@ import (
 
 // Layout constants (pixels).
 const (
-	marginLeft   = 60 // space for y-axis labels
-	marginRight  = 42 // space for per-series end labels
-	marginTop    = 28 // space for panel title
-	marginBottom = 34 // space for x-axis labels
-	panelGap     = 6  // vertical gap between stacked panels
+	marginLeft    = 60   // space for y-axis labels
+	marginRight   = 10   // small right padding
+	marginTop     = 28   // space for panel title
+	marginBottom  = 34   // space for x-axis labels
+	panelGap      = 6    // vertical gap between stacked panels
+	legendRowH    = 20   // height of one legend row
+	legendDotR    = 4    // radius of the colour dot
+	legendCharW   = 6.6  // approximate monospace character width at font-size 11
+	legendItemGap = 16   // horizontal gap between consecutive legend items
 )
 
 // ---- Public types -----------------------------------------------------------
@@ -66,25 +70,38 @@ func Render(fig Figure, w io.Writer) error {
 		return fmt.Errorf("svgchart: no panels")
 	}
 
-	totalH := n*fig.PanelHeight + (n-1)*panelGap
-	svgW := fig.Width
-	svgH := totalH
+	plotW := fig.Width - marginLeft - marginRight
+
+	// Pre-compute legend layout per panel so the total SVG height is known
+	// before writing any output.
+	allLegendRows := make([][][]int, n)
+	panelTotalH := make([]int, n)
+	for i, p := range fig.Panels {
+		rows := legendLayout(p.Series, plotW)
+		allLegendRows[i] = rows
+		panelTotalH[i] = fig.PanelHeight + len(rows)*legendRowH
+	}
+
+	totalH := (n - 1) * panelGap
+	for _, h := range panelTotalH {
+		totalH += h
+	}
 
 	// Open SVG root.
 	fmt.Fprintf(w, `<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" style="background:%s;font-family:monospace,sans-serif">%s`,
-		svgW, svgH, sc.bg, "\n")
+		fig.Width, totalH, sc.bg, "\n")
 
+	yOffset := 0
 	for i, panel := range fig.Panels {
-		yOffset := i * (fig.PanelHeight + panelGap)
-
 		// Merge figure-level and panel-level vlines.
 		merged := make([]VLine, 0, len(fig.VLines)+len(panel.VLines))
 		merged = append(merged, fig.VLines...)
 		merged = append(merged, panel.VLines...)
 
-		if err := renderPanel(w, panel, merged, fig, sc, yOffset, i); err != nil {
+		if err := renderPanel(w, panel, merged, allLegendRows[i], panelTotalH[i], fig, sc, yOffset, i); err != nil {
 			return err
 		}
+		yOffset += panelTotalH[i] + panelGap
 	}
 
 	fmt.Fprintln(w, `</svg>`)
@@ -93,7 +110,7 @@ func Render(fig Figure, w io.Writer) error {
 
 // ---- Panel renderer --------------------------------------------------------
 
-func renderPanel(w io.Writer, panel Panel, vlines []VLine, fig Figure, sc scheme, yOff, idx int) error {
+func renderPanel(w io.Writer, panel Panel, vlines []VLine, legendRows [][]int, totalH int, fig Figure, sc scheme, yOff, idx int) error {
 	ph := fig.PanelHeight
 	pw := fig.Width
 
@@ -104,9 +121,9 @@ func renderPanel(w io.Writer, panel Panel, vlines []VLine, fig Figure, sc scheme
 
 	clipID := fmt.Sprintf("clip%d", idx)
 
-	// Canvas background for this panel.
+	// Canvas background covers plot area plus legend strip.
 	fmt.Fprintf(w, `  <rect x="0" y="%d" width="%d" height="%d" fill="%s"/>%s`,
-		yOff, pw, ph, sc.canvas, "\n")
+		yOff, pw, totalH, sc.canvas, "\n")
 
 	// Clip path restricts series lines to the plot area.
 	// Coordinates are in the group-local space (after the translate below).
@@ -206,29 +223,19 @@ func renderPanel(w io.Writer, panel Panel, vlines []VLine, fig Figure, sc scheme
 	}
 	fmt.Fprintln(w, `    </g>`)
 
-	// --- Per-series end labels (outside clip, right margin) ---
-	for si, s := range panel.Series {
-		color := sc.lines[si%len(sc.lines)]
-		if s.Label == "" || len(s.Values) == 0 {
-			continue
+	// --- Grafana-style legend strip (below x-axis labels) ---
+	for rowIdx, row := range legendRows {
+		rowY := ph + rowIdx*legendRowH + legendRowH/2
+		x := float64(plotX)
+		for _, si := range row {
+			s := panel.Series[si]
+			color := sc.lines[si%len(sc.lines)]
+			fmt.Fprintf(w, `    <circle cx="%.1f" cy="%d" r="%d" fill="%s"/>%s`,
+				x+legendDotR, rowY, legendDotR, color, "\n")
+			fmt.Fprintf(w, `    <text x="%.1f" y="%d" fill="%s" font-size="11" dominant-baseline="middle">%s</text>%s`,
+				x+float64(legendDotR*2+4), rowY, sc.text, xmlEsc(s.Label), "\n")
+			x += float64(legendDotR*2+4) + float64(len(s.Label))*legendCharW + legendItemGap
 		}
-		// Find last non-NaN value for vertical positioning.
-		labelY := plotY + plotH/2
-		for j := len(s.Values) - 1; j >= 0; j-- {
-			if !math.IsNaN(s.Values[j]) && !math.IsInf(s.Values[j], 0) {
-				labelY = int(math.Round(toY(s.Values[j])))
-				break
-			}
-		}
-		// Clamp within plot area.
-		if labelY < plotY+8 {
-			labelY = plotY + 8
-		}
-		if labelY > plotY+plotH-4 {
-			labelY = plotY + plotH - 4
-		}
-		fmt.Fprintf(w, `    <text x="%d" y="%d" fill="%s" font-size="10" dominant-baseline="middle">%s</text>%s`,
-			plotX+plotW+4, labelY, color, xmlEsc(s.Label), "\n")
 	}
 
 	// Close panel group.
@@ -295,6 +302,44 @@ func seriesRange(series []Series) (float64, float64) {
 		max += 1
 	}
 	return min, max
+}
+
+// legendLayout computes wrapped legend rows for a panel's series.
+// Returns nil if no series have labels (legend omitted entirely).
+// Each returned []int is one row of series indices.
+func legendLayout(series []Series, plotW int) [][]int {
+	hasLabel := false
+	for _, s := range series {
+		if s.Label != "" {
+			hasLabel = true
+			break
+		}
+	}
+	if !hasLabel {
+		return nil
+	}
+
+	chipW := func(label string) float64 {
+		return float64(legendDotR*2+4) + float64(len(label))*legendCharW + legendItemGap
+	}
+
+	var rows [][]int
+	var row []int
+	rowX := 0.0
+	for i, s := range series {
+		w := chipW(s.Label)
+		if len(row) > 0 && rowX+w > float64(plotW) {
+			rows = append(rows, row)
+			row = nil
+			rowX = 0
+		}
+		row = append(row, i)
+		rowX += w
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // xmlEsc escapes the minimal set of characters required for SVG text content.
