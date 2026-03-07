@@ -13,7 +13,7 @@
       in
       {
         packages.default =
-          let renderVersion = "0.2.0"; in
+          let renderVersion = "0.2.1"; in
           pkgs.buildGoModule {
             pname = "prometheus-render";
             version = renderVersion;
