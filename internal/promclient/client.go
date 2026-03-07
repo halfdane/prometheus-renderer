@@ -73,7 +73,7 @@ func (c *Client) QueryRange(ctx context.Context, params QueryRangeParams) ([]Ser
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Prometheus returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("prometheus returned HTTP %d", resp.StatusCode)
 	}
 
 	var apiResp apiResponse
@@ -82,7 +82,7 @@ func (c *Client) QueryRange(ctx context.Context, params QueryRangeParams) ([]Ser
 	}
 
 	if apiResp.Status != "success" {
-		return nil, fmt.Errorf("Prometheus error: %s", apiResp.Error)
+		return nil, fmt.Errorf("prometheus error: %s", apiResp.Error)
 	}
 
 	series := make([]Series, 0, len(apiResp.Data.Result))
